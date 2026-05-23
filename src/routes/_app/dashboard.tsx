@@ -29,6 +29,7 @@ export const Route = createFileRoute("/_app/dashboard")({
 const slotTint: Record<string, string> = {
   active: "border-l-success",
   low: "border-l-warning",
+  low_stock: "border-l-destructive",
   empty: "border-l-destructive",
   unknown: "border-l-border",
 };
@@ -107,6 +108,18 @@ function DashboardPage() {
   const [deviceStatus, setDeviceStatus] = useState<"online" | "offline" | "unknown">("unknown");
   const [unresolvedAlerts, setUnresolvedAlerts] = useState<Alert[]>([]);
   const [firebaseConnected, setFirebaseConnected] = useState<"Yes" | "No" | "Error">("No");
+  
+  // Loading and Error states
+  const [deviceLoaded, setDeviceLoaded] = useState(false);
+  const [alertsLoaded, setAlertsLoaded] = useState(false);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [slotsError, setSlotsError] = useState<Record<SlotId, string | null>>({
+    slot1: null,
+    slot2: null,
+    slot3: null,
+  });
+
   const [debugDeviceStatus, setDebugDeviceStatus] = useState<string | null>(null);
   const [debugSlot1Medication, setDebugSlot1Medication] = useState<string | null>(null);
 
@@ -120,13 +133,17 @@ function DashboardPage() {
       (snapshot: DataSnapshot) => {
         const status = snapshot.val();
         console.log("Firebase /device/status:", status);
-        setDeviceStatus(status === "online" ? "online" : status === "offline" ? "offline" : "unknown");
+        setDeviceStatus(status === "online" ? "online" : "offline");
         setDebugDeviceStatus(status ?? "(no value)");
+        setDeviceLoaded(true);
+        setDeviceError(null);
         setFirebaseConnected("Yes");
       },
       (error) => {
         console.error("Firebase status listener error:", error);
         setFirebaseConnected("Error");
+        setDeviceError(error.message);
+        setDeviceLoaded(true);
         toast.error(`Failed to listen to device status: ${error.message}`);
       }
     );
@@ -150,6 +167,7 @@ function DashboardPage() {
               status: typeof raw.status === "string" ? raw.status : "unknown",
             },
           }));
+          setSlotsError((prev) => ({ ...prev, [slotId]: null }));
           if (slotId === "slot1") {
             setDebugSlot1Medication(raw.medication_name ?? "(no value)");
           }
@@ -158,6 +176,7 @@ function DashboardPage() {
         (error) => {
           console.error(`Firebase slot ${slotId} listener error:`, error);
           setFirebaseConnected("Error");
+          setSlotsError((prev) => ({ ...prev, [slotId]: error.message }));
           toast.error(`Failed to listen to Slot ${index + 1}: ${error.message}`);
         }
       );
@@ -185,11 +204,15 @@ function DashboardPage() {
         });
 
         setUnresolvedAlerts(unresolved);
+        setAlertsError(null);
+        setAlertsLoaded(true);
         setFirebaseConnected("Yes");
       },
       (error) => {
         console.error("Firebase alerts listener error:", error);
         setFirebaseConnected("Error");
+        setAlertsError(error.message);
+        setAlertsLoaded(true);
         toast.error(`Failed to listen to alerts: ${error.message}`);
       }
     );
@@ -204,26 +227,27 @@ function DashboardPage() {
   const latestAlertMessage = unresolvedAlerts[0]?.message || unresolvedAlerts[0]?.title || "";
 
   const getStatusBadge = () => {
+    if (!deviceLoaded) {
+      return "text-muted-foreground animate-pulse";
+    }
     if (deviceStatus === "online") {
       return "text-success font-semibold";
     }
-    if (deviceStatus === "offline") {
-      return "text-destructive font-semibold";
-    }
-    return "text-muted-foreground animate-pulse";
+    return "text-destructive font-semibold";
   };
 
   const getStatusLabel = () => {
+    if (!deviceLoaded) return "Loading...";
     if (deviceStatus === "online") return "Online";
-    if (deviceStatus === "offline") return "Offline";
-    return "Connecting...";
+    return "Offline";
   };
 
   const getSlotStatus = (stock: number, max: number, dbStatus?: string) => {
     if (dbStatus) {
       const lower = dbStatus.toLowerCase();
+      if (lower === "low_stock") return "low_stock";
       if (lower === "active" || lower === "low" || lower === "empty") {
-        return lower as "active" | "low" | "empty";
+        return lower as "active" | "low" | "empty" | "low_stock";
       }
     }
     if (stock <= 0) return "empty";
@@ -273,8 +297,21 @@ function DashboardPage() {
         </div>
       </div>
 
-      {/* Critical alert banner */}
-      {unresolvedCount > 0 && (
+      {/* Alerts Section (Error -> Loading -> Banner) */}
+      {alertsError ? (
+        <div className="rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-xs text-destructive flex items-center justify-between">
+          <span>Failed to load alerts: {alertsError}</span>
+          <CircleDot className="h-4 w-4 text-destructive shrink-0" />
+        </div>
+      ) : !alertsLoaded ? (
+        <div className="flex items-center gap-3 rounded-md border border-border bg-muted/20 px-4 py-3 text-sm animate-pulse">
+          <div className="h-4 w-4 rounded-full bg-muted" />
+          <div className="flex-1 space-y-2">
+            <div className="h-3 w-28 rounded bg-muted" />
+            <div className="h-2.5 w-48 rounded bg-muted" />
+          </div>
+        </div>
+      ) : unresolvedCount > 0 ? (
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm transition-all duration-300 hover:bg-destructive/10">
           <CircleDot className="h-4 w-4 text-destructive animate-pulse" />
           <div className="flex-1 min-w-0">
@@ -291,7 +328,7 @@ function DashboardPage() {
             View all →
           </Link>
         </div>
-      )}
+      ) : null}
 
       {/* Summary tiles (temporary mock data, wired later) */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -315,7 +352,23 @@ function DashboardPage() {
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {slotIds.map((slotId, index) => {
+              const error = slotsError[slotId];
               const slot = slotsState[slotId];
+
+              if (error) {
+                return (
+                  <article key={slotId} className="panel border-l-2 border-l-destructive p-4 bg-destructive/5 transition-all duration-300">
+                    <div className="flex items-center justify-between text-destructive">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider">Slot 0{index + 1} Error</span>
+                      <X className="h-4 w-4 animate-pulse" />
+                    </div>
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      {error}
+                    </p>
+                  </article>
+                );
+              }
+
               if (!slot.loaded) {
                 return (
                   <article key={slotId} className="panel border-l-2 border-l-border p-4 animate-pulse">
@@ -337,6 +390,7 @@ function DashboardPage() {
               const status = getSlotStatus(slot.stock_current, maxCapacity, slot.status);
               const displayName = slot.medication_name || "Unknown medication";
               const stockValue = Math.max(0, slot.stock_current);
+              const isLowStock = slot.status === "low_stock";
 
               return (
                 <article key={slotId} className={`panel border-l-2 ${slotTint[status]} p-4 transition-all duration-300 hover:shadow-md`}>
@@ -345,9 +399,15 @@ function DashboardPage() {
                       <span className="grid h-7 w-7 place-items-center rounded-md bg-muted text-[11px] font-semibold text-muted-foreground">
                         0{index + 1}
                       </span>
-                      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                        {status === "active" ? "Active" : status === "low" ? "Low stock" : "Empty"}
-                      </span>
+                      {isLowStock ? (
+                        <span className="rounded bg-destructive/10 px-2 py-0.5 text-[10px] font-semibold text-destructive uppercase tracking-wider">
+                          Low Stock
+                        </span>
+                      ) : (
+                        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                          {status === "active" ? "Active" : status === "low" ? "Low stock" : status === "empty" ? "Empty" : status}
+                        </span>
+                      )}
                     </div>
                     <Pill className="h-4 w-4 text-muted-foreground" />
                   </div>
@@ -394,9 +454,15 @@ function DashboardPage() {
           <div className="panel p-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">Device</h3>
-              <span className={`text-[11px] ${getStatusBadge()}`}>
-                ● {getStatusLabel()}
-              </span>
+              {deviceError ? (
+                <span className="text-[11px] text-destructive font-semibold">
+                  Error loading
+                </span>
+              ) : (
+                <span className={`text-[11px] ${getStatusBadge()}`}>
+                  ● {getStatusLabel()}
+                </span>
+              )}
             </div>
             <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
               <div className="text-muted-foreground">Name</div>
@@ -441,3 +507,4 @@ function DashboardPage() {
     </div>
   );
 }
+

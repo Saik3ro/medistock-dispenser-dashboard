@@ -1,0 +1,24 @@
+{
+  "rules": {
+    "invitations": {
+      "$inviteId": {
+        ".read": "auth != null && (data.child('patient_id').val() === auth.uid || root.child('caregivers').child(auth.uid).child('patient_ids').exists())",
+        ".write": "auth != null && newData.child('patient_id').val() === auth.uid"
+      }
+    },
+    "caregivers": {
+      "$caregiverId": {
+        ".read": "auth != null && (auth.uid === $caregiverId || root.child('caregivers').child(auth.uid).child('patient_ids').exists())",
+        ".write": "auth != null && auth.uid === $caregiverId"
+      }
+    }
+  }
+}
+
+/*
+Notes:
+- These rules are a starting point. They enforce that only an authenticated patient may create invitations for their own UID (newData.patient_id === auth.uid).
+- Caregivers may write their own record under /caregivers/{caregiver_uid} (auth.uid === caregiver_uid).
+- Reading permissions are permissive to allow patients and authenticated caregivers to read related data; adjust to your needs.
+- Because Realtime Database rules work best when arrays are stored as maps, consider storing patient_ids as an object (patientId: true) instead of a JS array for easier rule checks.
+*/
