@@ -1,5 +1,9 @@
+import { useEffect, useState } from "react";
+import type { DataSnapshot } from "firebase/database";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { db, ref, onValue } from "../../firebase";
 import { StockBar } from "@/components/medi/StockBar";
+import { toast } from "sonner";
 import {
   Pill,
   Check,
@@ -10,7 +14,7 @@ import {
   Activity as ActivityIcon,
   CircleDot,
 } from "lucide-react";
-import { slots, activity, summary, device, alerts } from "@/lib/mock-data";
+import { activity, summary, device } from "@/lib/mock-data";
 
 export const Route = createFileRoute("/_app/dashboard")({
   head: () => ({
@@ -26,7 +30,37 @@ const slotTint: Record<string, string> = {
   active: "border-l-success",
   low: "border-l-warning",
   empty: "border-l-destructive",
+  unknown: "border-l-border",
 };
+
+type SlotId = "slot1" | "slot2" | "slot3";
+
+type SlotState = {
+  medication_name: string;
+  stock_current: number;
+  stock_max: number;
+  status: string;
+  loaded: boolean;
+};
+
+const slotIds: SlotId[] = ["slot1", "slot2", "slot3"];
+
+const initialSlotState: SlotState = {
+  medication_name: "",
+  stock_current: 0,
+  stock_max: 100,
+  status: "unknown",
+  loaded: false,
+};
+
+interface Alert {
+  type: string;
+  slot?: string | number;
+  message: string;
+  timestamp: string | number;
+  resolved: boolean;
+  title?: string;
+}
 
 function StatTile({
   label,
@@ -47,8 +81,9 @@ function StatTile({
     destructive: "text-destructive bg-destructive/10",
     warning: "text-warning bg-warning/10",
   } as const;
+
   return (
-    <div className="panel p-4">
+    <div className="panel p-4 animate-fade-in">
       <div className="flex items-start justify-between">
         <div>
           <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
@@ -64,7 +99,138 @@ function StatTile({
 }
 
 function DashboardPage() {
-  const unresolved = alerts.filter((a) => !a.resolved);
+  const [slotsState, setSlotsState] = useState<Record<SlotId, SlotState>>({
+    slot1: { ...initialSlotState },
+    slot2: { ...initialSlotState },
+    slot3: { ...initialSlotState },
+  });
+  const [deviceStatus, setDeviceStatus] = useState<"online" | "offline" | "unknown">("unknown");
+  const [unresolvedAlerts, setUnresolvedAlerts] = useState<Alert[]>([]);
+  const [firebaseConnected, setFirebaseConnected] = useState<"Yes" | "No" | "Error">("No");
+  const [debugDeviceStatus, setDebugDeviceStatus] = useState<string | null>(null);
+  const [debugSlot1Medication, setDebugSlot1Medication] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsubscribers: Array<() => void> = [];
+
+    // 1. Listen to device status
+    const statusRef = ref(db, "device/status");
+    const statusUnsubscribe = onValue(
+      statusRef,
+      (snapshot: DataSnapshot) => {
+        const status = snapshot.val();
+        console.log("Firebase /device/status:", status);
+        setDeviceStatus(status === "online" ? "online" : status === "offline" ? "offline" : "unknown");
+        setDebugDeviceStatus(status ?? "(no value)");
+        setFirebaseConnected("Yes");
+      },
+      (error) => {
+        console.error("Firebase status listener error:", error);
+        setFirebaseConnected("Error");
+        toast.error(`Failed to listen to device status: ${error.message}`);
+      }
+    );
+    unsubscribers.push(statusUnsubscribe);
+
+    // 2. Listen to slots separately
+    slotIds.forEach((slotId, index) => {
+      const slotRef = ref(db, `slots/${slotId}`);
+      const slotUnsubscribe = onValue(
+        slotRef,
+        (snapshot: DataSnapshot) => {
+          const raw = snapshot.val() || {};
+          console.log(`Firebase /slots/${slotId}:`, raw);
+          setSlotsState((prev) => ({
+            ...prev,
+            [slotId]: {
+              loaded: true,
+              medication_name: typeof raw.medication_name === "string" ? raw.medication_name : "",
+              stock_current: raw.stock_current !== undefined ? Number(raw.stock_current) : 0,
+              stock_max: raw.stock_max !== undefined ? Number(raw.stock_max) : 100,
+              status: typeof raw.status === "string" ? raw.status : "unknown",
+            },
+          }));
+          if (slotId === "slot1") {
+            setDebugSlot1Medication(raw.medication_name ?? "(no value)");
+          }
+          setFirebaseConnected("Yes");
+        },
+        (error) => {
+          console.error(`Firebase slot ${slotId} listener error:`, error);
+          setFirebaseConnected("Error");
+          toast.error(`Failed to listen to Slot ${index + 1}: ${error.message}`);
+        }
+      );
+      unsubscribers.push(slotUnsubscribe);
+    });
+
+    // 3. Listen to unresolved alerts
+    const alertsRef = ref(db, "alerts");
+    const alertsUnsubscribe = onValue(
+      alertsRef,
+      (snapshot: DataSnapshot) => {
+        const raw = snapshot.val();
+        const items: Alert[] = raw
+          ? Array.isArray(raw)
+            ? raw.filter(Boolean)
+            : Object.values(raw)
+          : [];
+        const unresolved = items.filter((item: Alert) => item?.resolved === false);
+        
+        // Sort by timestamp descending so the newest alert is first
+        unresolved.sort((a, b) => {
+          const valA = typeof a.timestamp === "number" ? a.timestamp : new Date(a.timestamp).getTime() || 0;
+          const valB = typeof b.timestamp === "number" ? b.timestamp : new Date(b.timestamp).getTime() || 0;
+          return valB - valA;
+        });
+
+        setUnresolvedAlerts(unresolved);
+        setFirebaseConnected("Yes");
+      },
+      (error) => {
+        console.error("Firebase alerts listener error:", error);
+        setFirebaseConnected("Error");
+        toast.error(`Failed to listen to alerts: ${error.message}`);
+      }
+    );
+    unsubscribers.push(alertsUnsubscribe);
+
+    return () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+    };
+  }, []);
+
+  const unresolvedCount = unresolvedAlerts.length;
+  const latestAlertMessage = unresolvedAlerts[0]?.message || unresolvedAlerts[0]?.title || "";
+
+  const getStatusBadge = () => {
+    if (deviceStatus === "online") {
+      return "text-success font-semibold";
+    }
+    if (deviceStatus === "offline") {
+      return "text-destructive font-semibold";
+    }
+    return "text-muted-foreground animate-pulse";
+  };
+
+  const getStatusLabel = () => {
+    if (deviceStatus === "online") return "Online";
+    if (deviceStatus === "offline") return "Offline";
+    return "Connecting...";
+  };
+
+  const getSlotStatus = (stock: number, max: number, dbStatus?: string) => {
+    if (dbStatus) {
+      const lower = dbStatus.toLowerCase();
+      if (lower === "active" || lower === "low" || lower === "empty") {
+        return lower as "active" | "low" | "empty";
+      }
+    }
+    if (stock <= 0) return "empty";
+    if (stock <= 10 || (stock / max) <= 0.2) return "low";
+    return "active";
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -77,25 +243,57 @@ function DashboardPage() {
         </div>
         <Link
           to="/schedule"
-          className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-xs hover:bg-surface-2"
+          className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-xs hover:bg-surface-2 transition-colors duration-200"
         >
           Review schedule <ArrowUpRight className="h-3.5 w-3.5" />
         </Link>
       </div>
 
+      {/* Firebase Connection Status Debug */}
+      <div className="panel rounded-lg border border-dashed border-secondary/50 bg-secondary/5 p-4 text-sm text-muted-foreground transition-all duration-300">
+        <div className="flex items-center justify-between gap-4">
+          <span className="font-medium text-foreground">Firebase Connection</span>
+          <span className={
+            `rounded-full px-2 py-1 text-[11px] font-semibold transition-colors duration-300 ${
+              firebaseConnected === "Yes" ? "bg-success/10 text-success" : 
+              firebaseConnected === "Error" ? "bg-destructive/10 text-destructive animate-pulse" : 
+              "bg-warning/10 text-warning animate-pulse"
+            }`
+          }>
+            {firebaseConnected === "Yes" ? "Connected" : firebaseConnected === "Error" ? "Connection Error" : "Connecting..."}
+          </span>
+        </div>
+        <div className="mt-3 grid gap-2 text-[13px]">
+          <div>
+            <span className="font-medium text-foreground">Device status:</span> {debugDeviceStatus ?? "Loading..."}
+          </div>
+          <div>
+            <span className="font-medium text-foreground">Slot 1 medication:</span> {debugSlot1Medication ?? "Loading..."}
+          </div>
+        </div>
+      </div>
+
       {/* Critical alert banner */}
-      {unresolved.length > 0 && (
-        <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm">
-          <CircleDot className="h-4 w-4 text-destructive" />
-          <span className="font-medium text-foreground">{unresolved.length} unresolved alert{unresolved.length > 1 ? "s" : ""}</span>
-          <span className="text-muted-foreground">Latest: {unresolved[0].title}</span>
-          <Link to="/alerts" className="ml-auto text-xs text-primary hover:underline">
+      {unresolvedCount > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm transition-all duration-300 hover:bg-destructive/10">
+          <CircleDot className="h-4 w-4 text-destructive animate-pulse" />
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-foreground">
+              {unresolvedCount} Unresolved Alert{unresolvedCount > 1 ? "s" : ""}
+            </p>
+            {latestAlertMessage && (
+              <p className="text-muted-foreground text-xs truncate mt-0.5">
+                Latest: {latestAlertMessage}
+              </p>
+            )}
+          </div>
+          <Link to="/alerts" className="ml-auto text-xs font-medium text-primary hover:underline">
             View all →
           </Link>
         </div>
       )}
 
-      {/* Summary tiles */}
+      {/* Summary tiles (temporary mock data, wired later) */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile label="Scheduled today" value={summary.scheduled} hint="Across 3 dispenser slots" Icon={TimerReset} accent="primary" />
         <StatTile label="Taken" value={summary.taken} hint={`${summary.pending} pending later today`} Icon={Check} accent="success" />
@@ -116,28 +314,53 @@ function DashboardPage() {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {slots.map((s) => (
-              <article key={s.id} className={`panel border-l-2 ${slotTint[s.status]} p-4`}>
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="grid h-7 w-7 place-items-center rounded-md bg-muted text-[11px] font-semibold text-muted-foreground">
-                      0{s.id}
-                    </span>
-                    <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                      {s.status === "active" ? "Active" : s.status === "low" ? "Low stock" : "Empty"}
-                    </span>
+            {slotIds.map((slotId, index) => {
+              const slot = slotsState[slotId];
+              if (!slot.loaded) {
+                return (
+                  <article key={slotId} className="panel border-l-2 border-l-border p-4 animate-pulse">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="h-7 w-7 rounded-md bg-muted/50" />
+                        <div className="h-3 w-12 rounded bg-muted/50" />
+                      </div>
+                      <div className="h-4 w-4 rounded-full bg-muted/50" />
+                    </div>
+                    <div className="mt-4 h-5 w-3/4 rounded bg-muted/50" />
+                    <div className="mt-2 h-3 w-1/3 rounded bg-muted/50" />
+                    <div className="mt-4 h-1.5 w-full rounded bg-muted/50" />
+                  </article>
+                );
+              }
+
+              const maxCapacity = slot.stock_max || 100;
+              const status = getSlotStatus(slot.stock_current, maxCapacity, slot.status);
+              const displayName = slot.medication_name || "Unknown medication";
+              const stockValue = Math.max(0, slot.stock_current);
+
+              return (
+                <article key={slotId} className={`panel border-l-2 ${slotTint[status]} p-4 transition-all duration-300 hover:shadow-md`}>
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="grid h-7 w-7 place-items-center rounded-md bg-muted text-[11px] font-semibold text-muted-foreground">
+                        0{index + 1}
+                      </span>
+                      <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                        {status === "active" ? "Active" : status === "low" ? "Low stock" : "Empty"}
+                      </span>
+                    </div>
+                    <Pill className="h-4 w-4 text-muted-foreground" />
                   </div>
-                  <Pill className="h-4 w-4 text-muted-foreground" />
-                </div>
-                <div className="mt-3">
-                  <div className="text-sm font-medium leading-tight">{s.medication}</div>
-                  <div className="mt-1 text-[11px] text-muted-foreground">Next dose · {s.nextDose}</div>
-                </div>
-                <div className="mt-4">
-                  <StockBar value={s.stock} capacity={s.capacity} />
-                </div>
-              </article>
-            ))}
+                  <div className="mt-3">
+                    <div className="text-sm font-medium leading-tight">{displayName}</div>
+                    <div className="mt-1 text-[11px] text-muted-foreground">Stock: {stockValue}</div>
+                  </div>
+                  <div className="mt-4">
+                    <StockBar value={Math.min(stockValue, maxCapacity)} capacity={maxCapacity} />
+                  </div>
+                </article>
+              );
+            })}
           </div>
 
           {/* Activity table */}
@@ -153,11 +376,11 @@ function DashboardPage() {
                   e.action === "Missed" ? "text-destructive" :
                   e.action === "Refilled" ? "text-warning" : "text-success";
                 return (
-                  <li key={e.id} className="grid grid-cols-[110px_1fr_auto] items-center gap-3 px-4 py-2.5 text-xs">
+                  <li key={e.id} className="grid grid-cols-[110px_1fr_auto] items-center gap-3 px-4 py-2.5 text-xs hover:bg-muted/10 transition-colors duration-150">
                     <span className="text-mono text-muted-foreground">
                       {new Date(e.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                     </span>
-                    <span className="truncate">Slot 0{e.slot} · {slots.find(s => s.id === e.slot)?.medication}</span>
+                    <span className="truncate">Slot 0{e.slot} · {e.action}</span>
                     <span className={`text-[11px] font-medium ${cls}`}>{e.action}</span>
                   </li>
                 );
@@ -171,8 +394,8 @@ function DashboardPage() {
           <div className="panel p-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">Device</h3>
-              <span className={`text-[11px] ${device.online ? "text-success" : "text-destructive"}`}>
-                ● {device.online ? "Online" : "Offline"}
+              <span className={`text-[11px] ${getStatusBadge()}`}>
+                ● {getStatusLabel()}
               </span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">

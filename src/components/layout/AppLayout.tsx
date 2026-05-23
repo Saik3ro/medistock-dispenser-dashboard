@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import {
   LayoutDashboard,
@@ -9,6 +10,7 @@ import {
   Activity,
   Wifi,
   WifiOff,
+  Menu,
 } from "lucide-react";
 import { device, alerts } from "@/lib/mock-data";
 
@@ -21,12 +23,23 @@ const nav = [
   { to: "/settings", label: "Settings", icon: Settings },
 ] as const;
 
-function NavItem({ to, label, Icon }: { to: string; label: string; Icon: React.ComponentType<{ className?: string }> }) {
+function NavItem({
+  to,
+  label,
+  Icon,
+  onClick,
+}: {
+  to: string;
+  label: string;
+  Icon: React.ComponentType<{ className?: string }>;
+  onClick?: () => void;
+}) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const active = pathname === to;
   return (
     <Link
       to={to}
+      onClick={onClick}
       className={`group flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors ${
         active
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
@@ -44,6 +57,7 @@ export function AppLayout() {
   const unresolved = alerts.filter((a) => !a.resolved).length;
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const current = nav.find((n) => n.to === pathname);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -93,6 +107,14 @@ export function AppLayout() {
       <header className="sticky top-0 z-20 border-b border-border bg-background/85 backdrop-blur lg:pl-60">
         <div className="flex h-14 items-center gap-3 px-4 sm:px-6">
           <div className="flex items-center gap-2 lg:hidden">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((value) => !value)}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground hover:bg-surface-2"
+              aria-label="Open navigation menu"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
             <div className="grid h-7 w-7 place-items-center rounded-md bg-primary/15 text-primary">
               <Activity className="h-4 w-4" />
             </div>
@@ -132,6 +154,44 @@ export function AppLayout() {
           </div>
         </div>
       </header>
+
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setSidebarOpen(false)} />
+          <aside className="relative h-full w-72 overflow-y-auto border-r border-sidebar-border bg-sidebar p-4 shadow-lg">
+            <div className="flex items-center gap-2 px-2 pb-4">
+              <div className="grid h-8 w-8 place-items-center rounded-md bg-primary/15 text-primary">
+                <Activity className="h-4 w-4" />
+              </div>
+              <div className="leading-tight">
+                <div className="text-sm font-semibold tracking-tight">MediStock</div>
+                <div className="text-[11px] text-muted-foreground">Dispenser console</div>
+              </div>
+            </div>
+            <div className="rounded-md border border-sidebar-border bg-sidebar-accent/40 p-3">
+              <div className="flex items-center justify-between text-[11px] uppercase tracking-wider text-muted-foreground">
+                <span>Device</span>
+                <span className={device.online ? "text-success" : "text-destructive"}>
+                  {device.online ? "Online" : "Offline"}
+                </span>
+              </div>
+              <div className="mt-1 truncate text-sm font-medium">{device.name}</div>
+              <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                {device.online ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+                <span className="truncate">{device.ssid} · {device.signal}%</span>
+              </div>
+            </div>
+            <nav className="mt-4 space-y-1 px-1">
+              {nav.map((n) => (
+                <NavItem key={n.to} to={n.to} label={n.label} Icon={n.icon} onClick={() => setSidebarOpen(false)} />
+              ))}
+            </nav>
+            <div className="border-t border-sidebar-border px-4 py-3 text-[11px] text-muted-foreground">
+              Last sync · {new Date(device.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </div>
+          </aside>
+        </div>
+      )}
 
       {/* Main */}
       <main className="lg:pl-60">
