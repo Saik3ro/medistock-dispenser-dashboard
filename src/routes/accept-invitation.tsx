@@ -42,21 +42,21 @@ function AcceptInvitationPage() {
       }
 
       // Use Firebase Auth
-+      const current = auth.currentUser;
-+      if (!current) {
-+        setStatus("needs-login");
-+        setMessage("Please sign in or create an account to accept this invitation.");
-+        return;
-+      }
-+
-+      try {
-+        // Stop listening to avoid duplicate runs
-+        unsub();
-+        await acceptForUid(current.uid, match);
-+      } catch (err: any) {
-+        setStatus("error");
-+        setMessage(`Failed to accept invitation: ${err?.message ?? String(err)}`);
-+      }
+      const current = auth.currentUser;
+      if (!current) {
+        setStatus("needs-login");
+        setMessage("Please sign in or create an account to accept this invitation.");
+        return;
+      }
+
+      try {
+        // Stop listening to avoid duplicate runs
+        unsub();
+        await acceptForUid(current.uid, match);
+      } catch (err: any) {
+        setStatus("error");
+        setMessage(`Failed to accept invitation: ${err?.message ?? String(err)}`);
+      }
     });
 
     return () => unsub();

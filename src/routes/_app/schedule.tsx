@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback, memo } from "react";
 import type { DataSnapshot } from "firebase/database";
 import { db, ref, onValue, update, remove } from "../../firebase";
 import { toast } from "sonner";
@@ -137,7 +137,10 @@ function EditPanel({
   const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    nameRef.current?.focus();
+    const timer = requestAnimationFrame(() => {
+      nameRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(timer);
   }, []);
 
   const setField = <K extends keyof EditDraft>(key: K, value: EditDraft[K]) =>
@@ -235,6 +238,7 @@ function EditPanel({
           </span>
         </div>
         <button
+          type="button"
           onClick={onClose}
           className="grid h-7 w-7 place-items-center rounded-md border border-border text-muted-foreground hover:bg-surface-2 hover:text-foreground transition-colors"
           aria-label="Close edit panel"
@@ -432,6 +436,7 @@ function EditPanel({
               Delete this schedule?
             </span>
             <button
+              type="button"
               onClick={handleDelete}
               disabled={deleting}
               className="inline-flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-semibold text-destructive-foreground hover:opacity-90 disabled:opacity-60 transition-opacity"
@@ -440,6 +445,7 @@ function EditPanel({
               Yes, delete
             </button>
             <button
+              type="button"
               onClick={() => setShowDeleteConfirm(false)}
               className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-2 transition-colors"
             >
@@ -448,6 +454,7 @@ function EditPanel({
           </div>
         ) : (
           <button
+            type="button"
             onClick={() => setShowDeleteConfirm(true)}
             disabled={saving}
             className="inline-flex items-center gap-1.5 rounded-md border border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
@@ -459,6 +466,7 @@ function EditPanel({
 
         <div className="flex items-center gap-2">
           <button
+            type="button"
             onClick={onClose}
             disabled={saving}
             className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-2 transition-colors disabled:opacity-50"
@@ -466,6 +474,7 @@ function EditPanel({
             Cancel
           </button>
           <button
+            type="button"
             onClick={handleSave}
             disabled={saving}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-60"
@@ -485,7 +494,7 @@ function EditPanel({
 
 // ─── Schedule Row ─────────────────────────────────────────────────────────────
 
-function ScheduleRow({
+const ScheduleRow = memo(function ScheduleRow({
   schedule,
   isEditing,
   onEditToggle,
@@ -544,6 +553,7 @@ function ScheduleRow({
 
         {/* Edit button */}
         <button
+          type="button"
           onClick={onEditToggle}
           className={`grid h-7 w-7 place-items-center rounded-md border transition-colors ${
             isEditing
@@ -558,6 +568,7 @@ function ScheduleRow({
 
         {/* Pause / Resume button — replaces the confusing Power icon */}
         <button
+          type="button"
           onClick={handleTogglePause}
           disabled={toggling}
           className={`grid h-7 w-7 place-items-center rounded-md border transition-colors disabled:opacity-50 ${
@@ -586,7 +597,7 @@ function ScheduleRow({
       )}
     </li>
   );
-}
+});
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
@@ -633,9 +644,9 @@ function SchedulePage() {
     return () => unsub();
   }, []);
 
-  const handleEditToggle = (key: string) => {
+  const handleEditToggle = useCallback((key: string) => {
     setEditingKey((prev) => (prev === key ? null : key));
-  };
+  }, []);
 
   // Build calendar slot times from Firebase schedules (active only)
   const activeSchedules = schedules.filter((s) => s.active !== false);
@@ -664,6 +675,7 @@ function SchedulePage() {
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <div className="flex items-center gap-2">
               <button
+                type="button"
                 onClick={() =>
                   setCursor(
                     new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1)
@@ -676,6 +688,7 @@ function SchedulePage() {
               </button>
               <span className="text-sm font-medium">{monthLabel}</span>
               <button
+                type="button"
                 onClick={() =>
                   setCursor(
                     new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
