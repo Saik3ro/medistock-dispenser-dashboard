@@ -72,9 +72,11 @@ function AcceptInvitationPage() {
 
       await update(cgRef, {
         email: existing.email || match.email || "",
+        displayName: existing.displayName || match.family_name || "",
         patient_ids: merged,
         invited_by: existing.invited_by || match.patient_id,
         invited_at: Date.now(),
+        role: existing.role || match.role || "family_member",
       });
 
       // Update invitation status

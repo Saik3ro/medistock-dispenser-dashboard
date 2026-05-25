@@ -14,12 +14,12 @@ import {
   Activity as ActivityIcon,
   CircleDot,
 } from "lucide-react";
-import { activity, summary, device } from "@/lib/mock-data";
+import type { DispenseLog, InventoryLog, ScheduleEntry } from "@/types";
 
 export const Route = createFileRoute("/_app/dashboard")({
   head: () => ({
     meta: [
-      { title: "Overview — MediStock" },
+      { title: "Overview - MediStock" },
       { name: "description", content: "Today's doses, dispenser slots, and device status at a glance." },
     ],
   }),
@@ -44,6 +44,39 @@ type SlotState = {
   loaded: boolean;
 };
 
+type Alert = {
+  type: string;
+  slot?: string | number;
+  message: string;
+  timestamp: string | number;
+  resolved: boolean;
+  title?: string;
+};
+
+type RecentActivityItem = {
+  id: string;
+  timestamp: number;
+  label: string;
+  action: string;
+  tone: "primary" | "success" | "warning" | "destructive";
+};
+
+type TimelineItem = {
+  id: string;
+  time: string;
+  label: string;
+  state: "done" | "now" | "next";
+};
+
+type DeviceHeartbeatState = {
+  rawStatus: string;
+  firstSeenAt: number | null;
+  lastSnapshotAt: number | null;
+  lastAdvanceAt: number | null;
+  lastHeartbeatValue: number | null;
+  uptimeValue: number | null;
+};
+
 const slotIds: SlotId[] = ["slot1", "slot2", "slot3"];
 
 const initialSlotState: SlotState = {
@@ -54,14 +87,7 @@ const initialSlotState: SlotState = {
   loaded: false,
 };
 
-interface Alert {
-  type: string;
-  slot?: string | number;
-  message: string;
-  timestamp: string | number;
-  resolved: boolean;
-  title?: string;
-}
+const DEVICE_HEARTBEAT_TIMEOUT_MS = 45000;
 
 function StatTile({
   label,
@@ -94,7 +120,7 @@ function StatTile({
           <Icon className="h-4 w-4" />
         </div>
       </div>
-      {hint && <div className="mt-3 text-[11px] text-muted-foreground">{hint}</div>}
+      {hint ? <div className="mt-3 text-[11px] text-muted-foreground">{hint}</div> : null}
     </div>
   );
 }
@@ -108,8 +134,6 @@ function DashboardPage() {
   const [deviceStatus, setDeviceStatus] = useState<"online" | "offline" | "unknown">("unknown");
   const [unresolvedAlerts, setUnresolvedAlerts] = useState<Alert[]>([]);
   const [firebaseConnected, setFirebaseConnected] = useState<"Yes" | "No" | "Error">("No");
-  
-  // Loading and Error states
   const [deviceLoaded, setDeviceLoaded] = useState(false);
   const [alertsLoaded, setAlertsLoaded] = useState(false);
   const [deviceError, setDeviceError] = useState<string | null>(null);
@@ -119,44 +143,78 @@ function DashboardPage() {
     slot2: null,
     slot3: null,
   });
-
   const [debugDeviceStatus, setDebugDeviceStatus] = useState<string | null>(null);
   const [debugSlot1Medication, setDebugSlot1Medication] = useState<string | null>(null);
+  const [deviceInfo, setDeviceInfo] = useState<Record<string, unknown>>({});
+  const [deviceWifiName, setDeviceWifiName] = useState("Unavailable");
+  const [dispenseLogs, setDispenseLogs] = useState<DispenseLog[]>([]);
+  const [inventoryLogs, setInventoryLogs] = useState<InventoryLog[]>([]);
+  const [schedules, setSchedules] = useState<ScheduleEntry[]>([]);
+  const [deviceHeartbeatState, setDeviceHeartbeatState] = useState<DeviceHeartbeatState>({
+    rawStatus: "offline",
+    firstSeenAt: null,
+    lastSnapshotAt: null,
+    lastAdvanceAt: null,
+    lastHeartbeatValue: null,
+    uptimeValue: null,
+  });
+  const [heartbeatClock, setHeartbeatClock] = useState(Date.now());
 
   useEffect(() => {
     const unsubscribers: Array<() => void> = [];
 
-    // 1. Listen to device status
-    const statusRef = ref(db, "device/status");
-    const statusUnsubscribe = onValue(
-      statusRef,
+    const deviceRef = ref(db, "device");
+    const deviceUnsubscribe = onValue(
+      deviceRef,
       (snapshot: DataSnapshot) => {
-        const status = snapshot.val();
-        console.log("Firebase /device/status:", status);
-        setDeviceStatus(status === "online" ? "online" : "offline");
+        const deviceData = snapshot.val() || {};
+        const status = typeof deviceData.status === "string" ? deviceData.status : "offline";
+        const heartbeatValue = toFiniteNumber(deviceData.last_heartbeat);
+        const uptimeValue = toFiniteNumber(deviceData.uptime_s);
+        const now = Date.now();
+        setDeviceHeartbeatState((prev) => {
+          const heartbeatAdvanced =
+            heartbeatValue !== null
+            && prev.lastHeartbeatValue !== null
+            && heartbeatValue > prev.lastHeartbeatValue;
+          const uptimeAdvanced =
+            uptimeValue !== null
+            && prev.uptimeValue !== null
+            && uptimeValue > prev.uptimeValue;
+
+          return {
+            rawStatus: status,
+            firstSeenAt: prev.firstSeenAt ?? now,
+            lastSnapshotAt: now,
+            lastAdvanceAt: heartbeatAdvanced || uptimeAdvanced
+              ? now
+              : prev.lastAdvanceAt,
+            lastHeartbeatValue: heartbeatValue,
+            uptimeValue,
+          };
+        });
         setDebugDeviceStatus(status ?? "(no value)");
+        setDeviceInfo(deviceData);
+        setDeviceWifiName(resolveDeviceWifiName(deviceData));
         setDeviceLoaded(true);
         setDeviceError(null);
         setFirebaseConnected("Yes");
       },
       (error) => {
-        console.error("Firebase status listener error:", error);
         setFirebaseConnected("Error");
         setDeviceError(error.message);
         setDeviceLoaded(true);
         toast.error(`Failed to listen to device status: ${error.message}`);
       }
     );
-    unsubscribers.push(statusUnsubscribe);
+    unsubscribers.push(deviceUnsubscribe);
 
-    // 2. Listen to slots separately
     slotIds.forEach((slotId, index) => {
       const slotRef = ref(db, `slots/${slotId}`);
       const slotUnsubscribe = onValue(
         slotRef,
         (snapshot: DataSnapshot) => {
           const raw = snapshot.val() || {};
-          console.log(`Firebase /slots/${slotId}:`, raw);
           setSlotsState((prev) => ({
             ...prev,
             [slotId]: {
@@ -174,7 +232,6 @@ function DashboardPage() {
           setFirebaseConnected("Yes");
         },
         (error) => {
-          console.error(`Firebase slot ${slotId} listener error:`, error);
           setFirebaseConnected("Error");
           setSlotsError((prev) => ({ ...prev, [slotId]: error.message }));
           toast.error(`Failed to listen to Slot ${index + 1}: ${error.message}`);
@@ -183,7 +240,6 @@ function DashboardPage() {
       unsubscribers.push(slotUnsubscribe);
     });
 
-    // 3. Listen to unresolved alerts
     const alertsRef = ref(db, "alerts");
     const alertsUnsubscribe = onValue(
       alertsRef,
@@ -195,8 +251,7 @@ function DashboardPage() {
             : Object.values(raw)
           : [];
         const unresolved = items.filter((item: Alert) => item?.resolved === false);
-        
-        // Sort by timestamp descending so the newest alert is first
+
         unresolved.sort((a, b) => {
           const valA = typeof a.timestamp === "number" ? a.timestamp : new Date(a.timestamp).getTime() || 0;
           const valB = typeof b.timestamp === "number" ? b.timestamp : new Date(b.timestamp).getTime() || 0;
@@ -209,7 +264,6 @@ function DashboardPage() {
         setFirebaseConnected("Yes");
       },
       (error) => {
-        console.error("Firebase alerts listener error:", error);
         setFirebaseConnected("Error");
         setAlertsError(error.message);
         setAlertsLoaded(true);
@@ -218,19 +272,79 @@ function DashboardPage() {
     );
     unsubscribers.push(alertsUnsubscribe);
 
+    const dispenseRef = ref(db, "dispense_log");
+    const dispenseUnsubscribe = onValue(dispenseRef, (snapshot: DataSnapshot) => {
+      const raw = snapshot.val();
+      const items: DispenseLog[] = raw
+        ? Object.entries(raw).map(([key, value]: [string, any]) => ({
+            key,
+            ...value,
+          }))
+        : [];
+      items.sort((a, b) => b.timestamp - a.timestamp);
+      setDispenseLogs(items);
+      setFirebaseConnected("Yes");
+    });
+    unsubscribers.push(dispenseUnsubscribe);
+
+    const inventoryRef = ref(db, "inventory_log");
+    const inventoryUnsubscribe = onValue(inventoryRef, (snapshot: DataSnapshot) => {
+      const raw = snapshot.val();
+      const items: InventoryLog[] = raw
+        ? Object.entries(raw).map(([, value]: [string, any]) => value)
+        : [];
+      items.sort((a, b) => b.timestamp - a.timestamp);
+      setInventoryLogs(items);
+      setFirebaseConnected("Yes");
+    });
+    unsubscribers.push(inventoryUnsubscribe);
+
+    const scheduleRef = ref(db, "schedule");
+    const scheduleUnsubscribe = onValue(scheduleRef, (snapshot: DataSnapshot) => {
+      const raw = snapshot.val();
+      const items: ScheduleEntry[] = raw
+        ? Object.entries(raw).map(([key, value]: [string, any]) => ({
+            key,
+            ...value,
+          }))
+        : [];
+      setSchedules(items);
+      setFirebaseConnected("Yes");
+    });
+    unsubscribers.push(scheduleUnsubscribe);
+
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setHeartbeatClock(Date.now());
+    }, 5000);
+
+    return () => {
+      window.clearInterval(timer);
     };
   }, []);
 
   const unresolvedCount = unresolvedAlerts.length;
   const latestAlertMessage = unresolvedAlerts[0]?.message || unresolvedAlerts[0]?.title || "";
 
+  const derivedDeviceStatus = getDerivedDeviceStatus(deviceHeartbeatState, heartbeatClock);
+  const deviceStatusReason = getDeviceStatusReason(deviceHeartbeatState, heartbeatClock);
+  const deviceActivityLabel = derivedDeviceStatus === "online" ? "Heartbeat Active" : "No Heartbeat Activity";
+  const hasLiveWifiSignal = derivedDeviceStatus === "online" && deviceWifiName !== "Unavailable";
+
+  useEffect(() => {
+    setDeviceStatus(derivedDeviceStatus);
+  }, [derivedDeviceStatus]);
+
   const getStatusBadge = () => {
     if (!deviceLoaded) {
       return "text-muted-foreground animate-pulse";
     }
-    if (deviceStatus === "online") {
+    if (derivedDeviceStatus === "online") {
       return "text-success font-semibold";
     }
     return "text-destructive font-semibold";
@@ -238,7 +352,7 @@ function DashboardPage() {
 
   const getStatusLabel = () => {
     if (!deviceLoaded) return "Loading...";
-    if (deviceStatus === "online") return "Online";
+    if (derivedDeviceStatus === "online") return "Online";
     return "Offline";
   };
 
@@ -251,39 +365,57 @@ function DashboardPage() {
       }
     }
     if (stock <= 0) return "empty";
-    if (stock <= 10 || (stock / max) <= 0.2) return "low";
+    if (stock <= 10 || stock / max <= 0.2) return "low";
     return "active";
   };
 
+  const today = new Date();
+  const todayKey = toDateKey(today);
+  const activeSchedules = schedules.filter((schedule) => schedule.active !== false);
+  const todaysTimeline = buildTodayTimeline(activeSchedules, dispenseLogs, today);
+  const scheduledToday = todaysTimeline.length;
+  const takenToday = todaysTimeline.filter((item) => item.state === "done").length;
+  const missedToday = dispenseLogs.filter((log) => (
+    toDateKey(new Date(log.timestamp)) === todayKey && log.status === "missed"
+  )).length;
+  const pendingToday = Math.max(scheduledToday - takenToday - missedToday, 0);
+  const complianceToday = scheduledToday > 0 ? Math.round((takenToday / scheduledToday) * 100) : 0;
+  const recentActivity = buildRecentActivity(dispenseLogs, inventoryLogs).slice(0, 8);
+  const headerDate = today.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Good Morning, Eleanor</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Friday, May 22 · {summary.scheduled} doses scheduled today across 3 slots.
+            {headerDate} · {scheduledToday} doses scheduled today across 3 slots.
           </p>
         </div>
         <Link
           to="/schedule"
           className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-xs hover:bg-surface-2 transition-colors duration-200"
         >
-          Review schedule <ArrowUpRight className="h-3.5 w-3.5" />
+          Review Schedule <ArrowUpRight className="h-3.5 w-3.5" />
         </Link>
       </div>
 
-      {/* Firebase Connection Status Debug */}
       <div className="panel rounded-lg border border-dashed border-secondary/50 bg-secondary/5 p-4 text-sm text-muted-foreground transition-all duration-300">
         <div className="flex items-center justify-between gap-4">
           <span className="font-medium text-foreground">Firebase Connection</span>
-          <span className={
-            `rounded-full px-2 py-1 text-[11px] font-semibold transition-colors duration-300 ${
-              firebaseConnected === "Yes" ? "bg-success/10 text-success" : 
-              firebaseConnected === "Error" ? "bg-destructive/10 text-destructive animate-pulse" : 
-              "bg-warning/10 text-warning animate-pulse"
-            }`
-          }>
+          <span
+            className={`rounded-full px-2 py-1 text-[11px] font-semibold transition-colors duration-300 ${
+              firebaseConnected === "Yes"
+                ? "bg-success/10 text-success"
+                : firebaseConnected === "Error"
+                  ? "bg-destructive/10 text-destructive animate-pulse"
+                  : "bg-warning/10 text-warning animate-pulse"
+            }`}
+          >
             {firebaseConnected === "Yes" ? "Connected" : firebaseConnected === "Error" ? "Connection Error" : "Connecting..."}
           </span>
         </div>
@@ -300,7 +432,6 @@ function DashboardPage() {
         </div>
       </div>
 
-      {/* Alerts Section (Error -> Loading -> Banner) */}
       {alertsError ? (
         <div className="rounded-md border border-destructive/20 bg-destructive/5 px-4 py-3 text-xs text-destructive flex items-center justify-between">
           <span>Failed to load alerts: {alertsError}</span>
@@ -321,36 +452,33 @@ function DashboardPage() {
             <p className="font-medium text-foreground">
               {unresolvedCount} Unresolved Alert{unresolvedCount > 1 ? "s" : ""}
             </p>
-            {latestAlertMessage && (
+            {latestAlertMessage ? (
               <p className="text-muted-foreground text-xs truncate mt-0.5">
                 Latest: {latestAlertMessage}
               </p>
-            )}
+            ) : null}
           </div>
           <Link to="/alerts" className="ml-auto text-xs font-medium text-primary hover:underline">
-            View all →
+            View All →
           </Link>
         </div>
       ) : null}
 
-      {/* Summary tiles (temporary mock data, wired later) */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatTile label="Scheduled today" value={summary.scheduled} hint="Across 3 dispenser slots" Icon={TimerReset} accent="primary" />
-        <StatTile label="Taken" value={summary.taken} hint={`${summary.pending} pending later today`} Icon={Check} accent="success" />
-        <StatTile label="Missed" value={summary.missed} hint="Escalation triggered after 30m" Icon={X} accent="destructive" />
-        <StatTile label="Compliance" value={`${summary.compliance}%`} hint="7-day rolling average" Icon={ActivityIcon} accent="warning" />
+        <StatTile label="Scheduled Today" value={scheduledToday} hint="Across 3 Dispenser Slots" Icon={TimerReset} accent="primary" />
+        <StatTile label="Taken" value={takenToday} hint={`${pendingToday} Pending Later Today`} Icon={Check} accent="success" />
+        <StatTile label="Missed" value={missedToday} hint="From Today's Dispense Logs" Icon={X} accent="destructive" />
+        <StatTile label="Compliance" value={`${complianceToday}%`} hint="Today's Scheduled Dose Completion" Icon={ActivityIcon} accent="warning" />
       </div>
 
-      {/* Main grid */}
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Slot cards span 2 cols */}
         <section className="lg:col-span-2 space-y-3">
           <div className="flex items-end justify-between">
             <div>
               <h2 className="text-sm font-semibold tracking-tight">Dispenser Slots</h2>
-              <p className="text-[11px] text-muted-foreground">Live state from MediStock-A1</p>
+              <p className="text-[11px] text-muted-foreground">Live State From MediStock</p>
             </div>
-            <Link to="/inventory" className="text-[11px] text-primary hover:underline">Manage inventory</Link>
+            <Link to="/inventory" className="text-[11px] text-primary hover:underline">Manage Inventory</Link>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -365,9 +493,7 @@ function DashboardPage() {
                       <span className="text-[11px] font-semibold uppercase tracking-wider">Slot 0{index + 1} Error</span>
                       <X className="h-4 w-4 animate-pulse" />
                     </div>
-                    <p className="mt-3 text-xs text-muted-foreground">
-                      {error}
-                    </p>
+                    <p className="mt-3 text-xs text-muted-foreground">{error}</p>
                   </article>
                 );
               }
@@ -391,7 +517,7 @@ function DashboardPage() {
 
               const maxCapacity = slot.stock_max || 100;
               const status = getSlotStatus(slot.stock_current, maxCapacity, slot.status);
-              const displayName = slot.medication_name || "Unknown medication";
+              const displayName = slot.medication_name || "Unknown Medication";
               const stockValue = Math.max(0, slot.stock_current);
               const isLowStock = slot.status === "low_stock";
 
@@ -408,7 +534,7 @@ function DashboardPage() {
                         </span>
                       ) : (
                         <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                          {status === "active" ? "Active" : status === "low" ? "Low stock" : status === "empty" ? "Empty" : status}
+                          {status === "active" ? "Active" : status === "low" ? "Low Stock" : status === "empty" ? "Empty" : status}
                         </span>
                       )}
                     </div>
@@ -426,87 +552,269 @@ function DashboardPage() {
             })}
           </div>
 
-          {/* Activity table */}
           <div className="panel mt-4 overflow-hidden">
             <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-              <h3 className="text-sm font-semibold">Recent activity</h3>
-              <span className="text-[11px] text-muted-foreground">Last 24 hours</span>
+              <h3 className="text-sm font-semibold">Recent Activity</h3>
+              <span className="text-[11px] text-muted-foreground">Live Firebase Events</span>
             </div>
             <ul className="divide-y divide-border">
-              {activity.slice(0, 8).map((e) => {
+              {recentActivity.length > 0 ? recentActivity.map((item) => {
                 const cls =
-                  e.action === "Dispensed" ? "text-primary" :
-                  e.action === "Missed" ? "text-destructive" :
-                  e.action === "Refilled" ? "text-warning" : "text-success";
+                  item.tone === "primary" ? "text-primary" :
+                  item.tone === "destructive" ? "text-destructive" :
+                  item.tone === "warning" ? "text-warning" : "text-success";
                 return (
-                  <li key={e.id} className="grid grid-cols-[110px_1fr_auto] items-center gap-3 px-4 py-2.5 text-xs hover:bg-muted/10 transition-colors duration-150">
+                  <li key={item.id} className="grid grid-cols-[110px_1fr_auto] items-center gap-3 px-4 py-2.5 text-xs hover:bg-muted/10 transition-colors duration-150">
                     <span className="text-mono text-muted-foreground">
-                      {new Date(e.time).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      {new Date(item.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                     </span>
-                    <span className="truncate">Slot 0{e.slot} · {e.action}</span>
-                    <span className={`text-[11px] font-medium ${cls}`}>{e.action}</span>
+                    <span className="truncate">{item.label}</span>
+                    <span className={`text-[11px] font-medium ${cls}`}>{item.action}</span>
                   </li>
                 );
-              })}
+              }) : (
+                <li className="px-4 py-4 text-xs text-muted-foreground">No Recent Activity</li>
+              )}
             </ul>
           </div>
         </section>
 
-        {/* Right column: device + today timeline */}
         <aside className="space-y-4">
           <div className="panel p-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">Device</h3>
               {deviceError ? (
-                <span className="text-[11px] text-destructive font-semibold">
-                  Error loading
-                </span>
+                <span className="text-[11px] text-destructive font-semibold">Error Loading</span>
               ) : (
-                <span className={`text-[11px] ${getStatusBadge()}`}>
-                  ● {getStatusLabel()}
-                </span>
+                <span className={`text-[11px] ${getStatusBadge()}`}>● {getStatusLabel()}</span>
               )}
             </div>
             <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
               <div className="text-muted-foreground">Name</div>
-              <div className="text-right text-mono">{device.name}</div>
-              <div className="text-muted-foreground">Wi-Fi</div>
-              <div className="flex items-center justify-end gap-1.5 text-mono"><Wifi className="h-3 w-3" /> {device.ssid}</div>
-              <div className="text-muted-foreground">Signal</div>
-              <div className="text-right text-mono">{device.signal}%</div>
-              <div className="text-muted-foreground">Last sync</div>
-              <div className="text-right text-mono">{new Date(device.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+              <div className="text-right text-mono">MediStock</div>
+              <div className="text-muted-foreground">Wi-Fi Name</div>
+              <div className="flex items-center justify-end gap-1.5 text-mono">
+                <Wifi className="h-3 w-3" /> {hasLiveWifiSignal ? deviceWifiName : "No Signal"}
+              </div>
+              <div className="text-muted-foreground">Device Id</div>
+              <div className="text-right text-mono">{String(deviceInfo.device_id ?? "Unavailable")}</div>
+              <div className="text-muted-foreground">Activity</div>
+              <div className={`text-right text-mono ${derivedDeviceStatus === "online" ? "text-success" : "text-destructive"}`}>
+                {deviceActivityLabel}
+              </div>
             </div>
-            <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-muted">
-              <div className="h-full bg-primary" style={{ width: `${device.signal}%` }} />
-            </div>
+            <p className="mt-3 text-[11px] text-muted-foreground">{deviceStatusReason}</p>
           </div>
 
           <div className="panel p-4">
-            <h3 className="text-sm font-semibold">Today's timeline</h3>
+            <h3 className="text-sm font-semibold">Today's Timeline</h3>
             <ol className="mt-3 space-y-3">
-              {[
-                { time: "08:00", label: "Metformin · Slot 1", state: "done" },
-                { time: "12:30", label: "Lisinopril · Slot 2", state: "now" },
-                { time: "21:00", label: "Atorvastatin · Slot 3", state: "next" },
-              ].map((t) => (
-                <li key={t.time} className="flex items-start gap-3">
+              {todaysTimeline.length > 0 ? todaysTimeline.map((item) => (
+                <li key={item.id} className="flex items-start gap-3">
                   <span className="mt-1 grid h-2 w-2 shrink-0 place-items-center">
-                    <span className={`h-2 w-2 rounded-full ${t.state === "done" ? "bg-success" : t.state === "now" ? "bg-primary animate-pulse" : "bg-muted-foreground/40"}`} />
+                    <span className={`h-2 w-2 rounded-full ${item.state === "done" ? "bg-success" : item.state === "now" ? "bg-primary animate-pulse" : "bg-muted-foreground/40"}`} />
                   </span>
                   <div className="flex-1">
                     <div className="flex justify-between text-xs">
-                      <span className="text-mono text-muted-foreground">{t.time}</span>
-                      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{t.state}</span>
+                      <span className="text-mono text-muted-foreground">{item.time}</span>
+                      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{item.state}</span>
                     </div>
-                    <div className="text-sm">{t.label}</div>
+                    <div className="text-sm">{item.label}</div>
                   </div>
                 </li>
-              ))}
+              )) : (
+                <li className="text-sm text-muted-foreground">No Scheduled Doses For Today</li>
+              )}
             </ol>
           </div>
         </aside>
       </div>
     </div>
   );
+}
+
+function toDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function normalizeSlot(slot: number | string | undefined | null) {
+  if (slot === 1 || slot === "1" || slot === "slot1") return 1;
+  if (slot === 2 || slot === "2" || slot === "slot2") return 2;
+  if (slot === 3 || slot === "3" || slot === "slot3") return 3;
+  return null;
+}
+
+function normalizeScheduleDays(days: ScheduleEntry["days"]) {
+  const weekDayMap: Record<string, number> = {
+    sun: 0,
+    mon: 1,
+    tue: 2,
+    wed: 3,
+    thu: 4,
+    fri: 5,
+    sat: 6,
+  };
+  if (!Array.isArray(days)) return [];
+  return days
+    .map((day) => {
+      if (typeof day === "number") return day;
+      const namedDay = weekDayMap[String(day).slice(0, 3).toLowerCase()];
+      if (namedDay !== undefined) return namedDay;
+      const numericDay = Number(day);
+      return Number.isNaN(numericDay) ? -1 : numericDay;
+    })
+    .filter((day) => day >= 0 && day <= 6);
+}
+
+function scheduleRunsOnDate(schedule: ScheduleEntry, date: Date) {
+  const dateKey = toDateKey(date);
+  if (schedule.active === false) return false;
+  if (schedule.start_date && schedule.start_date > dateKey) return false;
+  if (schedule.end_date && schedule.end_date < dateKey) return false;
+  if (schedule.frequency === "weekly") {
+    return normalizeScheduleDays(schedule.days).includes(date.getDay());
+  }
+  return true;
+}
+
+function buildTodayTimeline(
+  schedules: ScheduleEntry[],
+  dispenseLogs: DispenseLog[],
+  date: Date
+): TimelineItem[] {
+  const nowMinutes = date.getHours() * 60 + date.getMinutes();
+  const todayKey = toDateKey(date);
+  const dispensedToday = dispenseLogs.filter((log) => (
+    log.status === "dispensed" && toDateKey(new Date(log.timestamp)) === todayKey
+  ));
+
+  return schedules
+    .filter((schedule) => scheduleRunsOnDate(schedule, date))
+    .flatMap((schedule) => {
+      const times = Array.isArray(schedule.times) && schedule.times.length > 0 ? schedule.times : ["00:00"];
+      return times.map((time, index) => {
+        const [hours, minutes] = time.split(":").map((value) => Number(value) || 0);
+        const scheduleMinutes = hours * 60 + minutes;
+        const matchingDispense = dispensedToday.find((log) => (
+          normalizeSlot(log.slot) === normalizeSlot(schedule.slot)
+          && log.medication_name === schedule.medication_name
+        ));
+
+        let state: TimelineItem["state"] = "next";
+        if (matchingDispense) {
+          state = "done";
+        } else if (scheduleMinutes <= nowMinutes) {
+          state = "now";
+        }
+
+        return {
+          id: `${schedule.key ?? schedule.medication_name}-${time}-${index}`,
+          time,
+          label: `${schedule.medication_name} · Slot ${normalizeSlot(schedule.slot) ?? "?"}`,
+          state,
+        };
+      });
+    })
+    .sort((a, b) => a.time.localeCompare(b.time));
+}
+
+function buildRecentActivity(
+  dispenseLogs: DispenseLog[],
+  inventoryLogs: InventoryLog[]
+): RecentActivityItem[] {
+  const dispenseItems: RecentActivityItem[] = dispenseLogs.map((log, index) => ({
+    id: `dispense-${log.key ?? index}`,
+    timestamp: log.timestamp,
+    label: `${log.medication_name} · Slot ${log.slot}`,
+    action: toTitleCase(log.status),
+    tone: log.status === "missed" || log.status === "jammed" ? "destructive" : "primary",
+  }));
+
+  const inventoryItems: RecentActivityItem[] = inventoryLogs.map((log, index) => ({
+    id: `inventory-${index}-${log.timestamp}`,
+    timestamp: log.timestamp,
+    label: `${log.medication_name} · Slot ${log.slot}`,
+    action: log.action === "added" ? "Refilled" : toTitleCase(log.action),
+    tone: log.action === "added" ? "warning" : "success",
+  }));
+
+  return [...dispenseItems, ...inventoryItems].sort((a, b) => b.timestamp - a.timestamp);
+}
+
+function toTitleCase(value: string) {
+  return value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function toFiniteNumber(value: unknown) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeHeartbeatTimestamp(value: number | null) {
+  if (value === null || value <= 0) return null;
+  if (value > 1_000_000_000_000) return value;
+  if (value > 1_000_000_000) return value * 1000;
+  return null;
+}
+
+function getDerivedDeviceStatus(state: DeviceHeartbeatState, now: number) {
+  const rawOnline = state.rawStatus.toLowerCase() === "online";
+  if (!rawOnline) return "offline";
+
+  const normalizedHeartbeat = normalizeHeartbeatTimestamp(state.lastHeartbeatValue);
+  if (normalizedHeartbeat !== null) {
+    return now - normalizedHeartbeat <= DEVICE_HEARTBEAT_TIMEOUT_MS ? "online" : "offline";
+  }
+
+  if (state.lastAdvanceAt !== null) {
+    return now - state.lastAdvanceAt <= DEVICE_HEARTBEAT_TIMEOUT_MS ? "online" : "offline";
+  }
+
+  return "offline";
+}
+
+function getDeviceStatusReason(state: DeviceHeartbeatState, now: number) {
+  const rawOnline = state.rawStatus.toLowerCase() === "online";
+  if (!rawOnline) {
+    return "Firebase currently reports the ESP32 as offline.";
+  }
+
+  const normalizedHeartbeat = normalizeHeartbeatTimestamp(state.lastHeartbeatValue);
+  if (normalizedHeartbeat !== null) {
+    const staleFor = now - normalizedHeartbeat;
+    if (staleFor <= DEVICE_HEARTBEAT_TIMEOUT_MS) {
+      return "Recent heartbeat detected from Firebase.";
+    }
+    return "No recent ESP32 heartbeat was detected in Firebase.";
+  }
+
+  if (state.lastAdvanceAt !== null) {
+    return now - state.lastAdvanceAt <= DEVICE_HEARTBEAT_TIMEOUT_MS
+      ? "Live ESP32 heartbeat activity is changing in Firebase."
+      : "Firebase heartbeat values stopped changing, so the device is treated as offline.";
+  }
+
+  return "Firebase has not shown live heartbeat activity from the ESP32.";
+}
+
+function resolveDeviceWifiName(deviceData: Record<string, unknown>) {
+  const settings = typeof deviceData.settings === "object" && deviceData.settings !== null
+    ? deviceData.settings as Record<string, unknown>
+    : {};
+  const wifiFields = [
+    deviceData.ssid,
+    deviceData.wifi_name,
+    deviceData.wifi_ssid,
+    settings.ssid,
+    settings.wifi_name,
+    settings.wifi_ssid,
+  ];
+  const match = wifiFields.find((value) => typeof value === "string" && value.trim().length > 0);
+  return typeof match === "string" ? match : "Unavailable";
 }

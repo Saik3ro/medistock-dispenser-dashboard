@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
-import { db, ref, push, set, onValue, update } from "../firebase";
+import { db, ref, push, set, onValue } from "../firebase";
 import { sendInvitationEmail } from "../lib/emailjs";
 import { toast } from "sonner";
 
 function getPatientIdFallback() {
-  // Try common locations for patient id: localStorage, env
   if (typeof window !== "undefined") {
     const fromLs = window.localStorage.getItem("patient_id") || window.localStorage.getItem("uid");
     if (fromLs) return fromLs;
@@ -13,50 +12,63 @@ function getPatientIdFallback() {
   return null;
 }
 
+function isValidEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function normalizeName(value: string) {
+  return value
+    .replace(/[^a-zA-Z\s]/g, "")
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
 export default function CaregiverInvite({ patientId, patientName }: { patientId?: string; patientName?: string }) {
   const resolvedPatientId = patientId ?? getPatientIdFallback();
   const resolvedPatientName = patientName ?? "";
 
+  const [familyName, setFamilyName] = useState("");
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
-  const [invitations, setInvitations] = useState<Array<any>>([]);
-  const [caregivers, setCaregivers] = useState<Array<any>>([]);
+  const [members, setMembers] = useState<Array<any>>([]);
 
   useEffect(() => {
     if (!resolvedPatientId) return;
-    const invRef = ref(db, "invitations");
-    const unsubInv = onValue(invRef, (snap) => {
-      const raw = snap.val() || {};
-      const list: any[] = Object.entries(raw)
-        .map(([key, v]) => ({ key, ...(v as any) }))
-        .filter((it) => it.patient_id === resolvedPatientId);
-      setInvitations(list.sort((a, b) => (a.created_at > b.created_at ? -1 : 1)));
-    });
 
-    const cgRef = ref(db, "caregivers");
-    const unsubCg = onValue(cgRef, (snap) => {
-      const raw = snap.val() || {};
+    const caregiversRef = ref(db, "caregivers");
+    const unsubscribe = onValue(caregiversRef, (snapshot) => {
+      const raw = snapshot.val() || {};
       const list = Object.entries(raw)
-        .map(([key, v]) => ({ uid: key, ...(v as any) }))
-        .filter((c) => Array.isArray(c.patient_ids) ? c.patient_ids.includes(resolvedPatientId) : (c.patient_ids && c.patient_ids[resolvedPatientId]));
-      setCaregivers(list);
+        .map(([key, value]) => ({ uid: key, ...(value as any) }))
+        .filter((entry) => (
+          Array.isArray(entry.patient_ids)
+            ? entry.patient_ids.includes(resolvedPatientId)
+            : entry.patient_ids && entry.patient_ids[resolvedPatientId]
+        ))
+        .sort((a, b) => Number(b.invited_at || 0) - Number(a.invited_at || 0));
+      setMembers(list);
     });
 
     return () => {
-      unsubInv();
-      unsubCg();
+      unsubscribe();
     };
   }, [resolvedPatientId]);
 
-  const validateEmail = (e: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
-
   const handleSend = async () => {
+    const normalizedFamilyName = normalizeName(familyName);
+
     if (!resolvedPatientId) {
       toast.error("Missing patient id. Set localStorage.patient_id or pass as prop.");
       return;
     }
-    if (!validateEmail(email)) {
-      toast.error("Please enter a valid email");
+    if (!normalizedFamilyName) {
+      toast.error("Family member name is required.");
+      return;
+    }
+    if (!isValidEmail(email)) {
+      toast.error("Please enter a valid email address.");
       return;
     }
 
@@ -64,101 +76,87 @@ export default function CaregiverInvite({ patientId, patientName }: { patientId?
     try {
       const token = crypto?.randomUUID ? crypto.randomUUID() : `tk_${Date.now().toString(36)}`;
       const now = Date.now();
-      const expires = now + 7 * 24 * 60 * 60 * 1000; // 7 days
+      const expires = now + 7 * 24 * 60 * 60 * 1000;
 
-      const invitationsRef = ref(db, `invitations`);
+      const invitationsRef = ref(db, "invitations");
       const newRef = push(invitationsRef);
-      const payload = {
+      await set(newRef, {
         email: email.toLowerCase(),
         patient_id: resolvedPatientId,
-        patient_name: resolvedPatientName || "",
-        token,
+        patient_name: resolvedPatientName,
+        family_name: normalizedFamilyName,
+        role: "family_member",
+        notification_access: true,
         status: "pending",
+        token,
         created_at: now,
         expires_at: expires,
-      };
-      await set(newRef, payload);
+      });
 
-      // Send email via EmailJS
       const inviteLink = `${location.origin}/accept-invitation?token=${encodeURIComponent(token)}`;
       const expiryDate = new Date(expires).toISOString().slice(0, 10);
       try {
-        await sendInvitationEmail({ toEmail: email, patientName: resolvedPatientName || "", inviteLink, expiryDate });
-        toast.success("Invitation sent");
-      } catch (err: any) {
-        toast.error(`Saved invitation but email failed: ${err?.message ?? String(err)}`);
+        await sendInvitationEmail({
+          toEmail: email,
+          patientName: resolvedPatientName || normalizedFamilyName,
+          inviteLink,
+          expiryDate,
+        });
+        toast.success("Family member invitation sent.");
+      } catch (error: any) {
+        toast.error(`Invitation saved but email failed: ${error?.message ?? String(error)}`);
       }
 
+      setFamilyName("");
       setEmail("");
-    } catch (err: any) {
-      toast.error(`Failed to create invitation: ${err?.message ?? String(err)}`);
+    } catch (error: any) {
+      toast.error(`Failed to create invitation: ${error?.message ?? String(error)}`);
     } finally {
       setSending(false);
-    }
-  };
-
-  const cancelInvitation = async (key: string) => {
-    try {
-      await update(ref(db, `invitations/${key}`), { status: "expired" });
-      toast.success("Invitation cancelled");
-    } catch (err: any) {
-      toast.error(`Failed to cancel: ${err?.message ?? String(err)}`);
     }
   };
 
   return (
     <div className="space-y-4">
       <div className="panel p-4">
-        <h3 className="text-sm font-semibold">Invite Caregiver</h3>
-        <p className="mt-1 text-xs text-muted-foreground">Send a time-limited invitation to a caregiver via email.</p>
+        <h3 className="text-sm font-semibold">Invite Family Member</h3>
+        <p className="mt-1 text-xs text-muted-foreground">Add a family member who can receive the same alerts and notifications as the caregiver.</p>
 
-        <div className="mt-3 flex gap-2">
+        <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+          <input
+            value={familyName}
+            onChange={(event) => setFamilyName(normalizeName(event.target.value).slice(0, 40))}
+            className="w-full rounded-md border border-input bg-input/40 px-3 py-2 text-sm outline-none"
+            aria-label="Family Member Name"
+          />
           <input
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="caregiver@example.com"
+            onChange={(event) => setEmail(event.target.value)}
             className="w-full rounded-md border border-input bg-input/40 px-3 py-2 text-sm outline-none"
+            aria-label="Family Member Email"
           />
           <button onClick={handleSend} disabled={sending} className="rounded-md bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground">
-            {sending ? "Sending…" : "Send Invitation"}
+            {sending ? "Sending..." : "Send Invitation"}
           </button>
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="panel p-4">
-          <h4 className="text-xs font-semibold">Pending invitations</h4>
-          <ul className="mt-3 space-y-2 text-sm">
-            {invitations.length === 0 && <li className="text-muted-foreground">No pending invitations</li>}
-            {invitations.map((inv) => (
-              <li key={inv.key} className="flex items-center justify-between">
-                <div>
-                  <div className="font-medium">{inv.email}</div>
-                  <div className="text-xs text-muted-foreground">Expires: {new Date(inv.expires_at).toLocaleDateString()}</div>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => (navigator.clipboard?.writeText(`${location.origin}/accept-invitation?token=${inv.token}`))} className="text-xs text-muted-foreground hover:underline">Copy Link</button>
-                  <button onClick={() => cancelInvitation(inv.key)} className="text-xs text-destructive">Cancel</button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        <div className="panel p-4">
-          <h4 className="text-xs font-semibold">Accepted caregivers</h4>
-          <ul className="mt-3 space-y-2 text-sm">
-            {caregivers.length === 0 && <li className="text-muted-foreground">No caregivers yet</li>}
-            {caregivers.map((c) => (
-              <li key={c.uid} className="flex items-center justify-between">
-                <div>
-                  <div className="font-medium">{c.email || c.uid}</div>
-                  <div className="text-xs text-muted-foreground">Added: {c.invited_at ? new Date(c.invited_at).toLocaleDateString() : "—"}</div>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
+      <div className="panel p-4">
+        <h4 className="text-xs font-semibold">Recent Family Members Added</h4>
+        <ul className="mt-3 space-y-2 text-sm">
+          {members.length === 0 ? <li className="text-muted-foreground">No family members added yet.</li> : null}
+          {members.slice(0, 8).map((member) => (
+            <li key={member.uid} className="flex items-center justify-between">
+              <div>
+                <div className="font-medium">{member.displayName || member.family_name || member.email || member.uid}</div>
+                <div className="text-xs text-muted-foreground">{member.email || "No Email Available"}</div>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {member.invited_at ? new Date(member.invited_at).toLocaleDateString() : "Added Recently"}
+              </div>
+            </li>
+          ))}
+        </ul>
       </div>
     </div>
   );

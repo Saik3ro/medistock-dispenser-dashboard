@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
+import { db, onValue, ref } from "@/firebase";
 import {
   LayoutDashboard,
   CalendarDays,
@@ -137,6 +138,7 @@ export function AppLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const current = nav.find((n) => n.to === pathname);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [profileName, setProfileName] = useState("Caregiver");
   
   // Collapse state for desktop side menu, persisting to localStorage
   const [isCollapsed, setIsCollapsed] = useState(() => {
@@ -153,6 +155,25 @@ export function AppLayout() {
       return next;
     });
   };
+
+  useEffect(() => {
+    const patientId = getCurrentPatientId();
+    const profileRef = ref(db, `patient_profiles/${patientId}`);
+    const unsubscribe = onValue(profileRef, (snapshot) => {
+      if (!snapshot.exists()) return;
+      const value = snapshot.val() || {};
+      const nextName = typeof value.contact_name === "string" && value.contact_name.trim()
+        ? value.contact_name.trim()
+        : typeof value.patient_name === "string" && value.patient_name.trim()
+          ? value.patient_name.trim()
+          : "Caregiver";
+      setProfileName(nextName);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -172,7 +193,7 @@ export function AppLayout() {
           {!isCollapsed && (
             <div className="leading-tight animate-fade-in">
               <div className="text-sm font-semibold tracking-tight">MediStock</div>
-              <div className="text-[11px] text-muted-foreground">Dispenser console</div>
+              <div className="text-[11px] text-muted-foreground">Dispense Console</div>
             </div>
           )}
         </div>
@@ -270,9 +291,9 @@ export function AppLayout() {
               <div className="hidden items-center gap-3 sm:flex">
                 <PatientSwitcher />
                 <div className="h-9 items-center gap-2 rounded-md border border-border bg-surface px-2.5 flex">
-                  <div className="grid h-6 w-6 place-items-center rounded-full bg-primary/20 text-[11px] font-semibold text-primary">EM</div>
+                  <div className="grid h-6 w-6 place-items-center rounded-full bg-primary/20 text-[11px] font-semibold text-primary">{getInitials(profileName)}</div>
                   <div className="leading-tight">
-                    <div className="text-xs font-medium">Eleanor M.</div>
+                    <div className="text-xs font-medium">{profileName}</div>
                     <div className="text-[10px] text-muted-foreground">Caregiver</div>
                   </div>
                 </div>
@@ -291,7 +312,7 @@ export function AppLayout() {
               </div>
               <div className="leading-tight">
                 <div className="text-sm font-semibold tracking-tight">MediStock</div>
-                <div className="text-[11px] text-muted-foreground">Dispenser console</div>
+                <div className="text-[11px] text-muted-foreground">Dispense Console</div>
               </div>
             </div>
             <div className="rounded-md border border-sidebar-border bg-sidebar-accent/40 p-3">
@@ -352,4 +373,20 @@ export function AppLayout() {
       </nav>
     </div>
   );
+}
+
+function getCurrentPatientId() {
+  if (typeof window !== "undefined") {
+    return window.localStorage.getItem("current_patient")
+      || window.localStorage.getItem("patient_id")
+      || window.localStorage.getItem("uid")
+      || "default_patient";
+  }
+  return "default_patient";
+}
+
+function getInitials(name: string) {
+  const parts = name.split(" ").filter(Boolean).slice(0, 2);
+  if (parts.length === 0) return "CG";
+  return parts.map((part) => part.charAt(0).toUpperCase()).join("");
 }
