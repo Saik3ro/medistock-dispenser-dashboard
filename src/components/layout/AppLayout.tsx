@@ -8,6 +8,7 @@ import {
   Settings,
   Boxes,
   Activity,
+  Clock,
   Wifi,
   WifiOff,
   Menu,
@@ -105,6 +106,28 @@ function PatientSwitcher() {
           <option key={p.id} value={p.id}>{p.name}</option>
         ))}
       </select>
+    </div>
+  );
+}
+
+function RealtimeClock() {
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <div className="hidden items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-muted-foreground sm:flex">
+      <Clock className="h-3.5 w-3.5 text-primary" />
+      <span className="font-mono text-foreground">
+        {now.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })}
+      </span>
     </div>
   );
 }
@@ -231,10 +254,7 @@ export function AppLayout() {
           </div>
 
           <div className="ml-auto flex items-center gap-2">
-            <div className="hidden items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-muted-foreground sm:flex">
-              <span className="h-1.5 w-1.5 rounded-full bg-success" />
-              Realtime · Firebase
-            </div>
+            <RealtimeClock />
             <Link
               to="/alerts"
               className="relative inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-surface hover:bg-surface-2"

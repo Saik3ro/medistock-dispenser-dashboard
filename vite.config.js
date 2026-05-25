@@ -28,7 +28,7 @@ export default defineConfig({
         manualChunks: {
           'vendor-ui': ['@radix-ui/react-dialog', '@radix-ui/react-dropdown-menu', '@radix-ui/react-select'],
           'vendor-charts': ['recharts'],
-          'vendor-firebase': ['firebase'],
+          'vendor-firebase': ['firebase/app', 'firebase/auth', 'firebase/database'],
           'vendor-router': ['@tanstack/react-router', '@tanstack/react-query'],
         },
       },

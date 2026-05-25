@@ -37,7 +37,7 @@ export const Route = createFileRoute("/_app/schedule")({
 
 interface ScheduleEntry {
   key: string;
-  slot: string;
+  slot: string | number;
   medication_name: string;
   dosage?: string;
   frequency: string;
@@ -47,7 +47,13 @@ interface ScheduleEntry {
   active: boolean;
 }
 
+type SlotKey = "slot1" | "slot2" | "slot3";
 type Frequency = "daily" | "twice_daily" | "weekly" | "custom";
+
+interface SlotStock {
+  medication_name: string;
+  stock_current: number;
+}
 
 interface EditDraft {
   medication_name: string;
@@ -59,17 +65,19 @@ interface EditDraft {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const SLOT_COLORS: Record<string, string> = {
+const SLOT_COLORS: Record<SlotKey, string> = {
   slot1: "bg-primary",
   slot2: "bg-warning",
   slot3: "bg-chart-4",
 };
 
-const SLOT_NUM: Record<string, number> = {
+const SLOT_NUM: Record<SlotKey, number> = {
   slot1: 1,
   slot2: 2,
   slot3: 3,
 };
+
+const SLOT_KEYS: SlotKey[] = ["slot1", "slot2", "slot3"];
 
 const WEEK_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -113,6 +121,88 @@ function timesForFrequency(freq: Frequency, current: string[]): string[] {
     return [current[0] || "08:00", current[1] || "20:00"];
   if (freq === "weekly") return [current[0] || "08:00"];
   return current.length > 0 ? current : ["08:00"];
+}
+
+function normalizeSlotKey(slot: string | number | undefined): SlotKey | null {
+  if (slot === 1 || slot === "1" || slot === "slot1") return "slot1";
+  if (slot === 2 || slot === "2" || slot === "slot2") return "slot2";
+  if (slot === 3 || slot === "3" || slot === "slot3") return "slot3";
+  return null;
+}
+
+function localDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function startOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function parseStartDate(value?: string): Date {
+  if (!value) return startOfLocalDay(new Date());
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return startOfLocalDay(new Date(value));
+  return new Date(year, month - 1, day);
+}
+
+function dosesPerOccurrence(schedule: ScheduleEntry): number {
+  if (schedule.frequency === "twice_daily") return Math.max(2, schedule.times?.length || 2);
+  if (schedule.frequency === "custom") return Math.max(1, schedule.times?.length || 1);
+  return 1;
+}
+
+function isWeeklyDoseDay(schedule: ScheduleEntry, date: Date): boolean {
+  if (schedule.frequency !== "weekly") return true;
+  const days = schedule.days || [];
+  if (days.length === 0) return true;
+  return days.includes(WEEK_DAYS[date.getDay()]);
+}
+
+function buildCalendarDoses(
+  schedules: ScheduleEntry[],
+  slots: Record<SlotKey, SlotStock>,
+  monthStart: Date,
+  monthEnd: Date
+) {
+  const calendar: Record<string, Array<{ schedule: ScheduleEntry; slotKey: SlotKey; time: string }>> = {};
+
+  schedules
+    .filter((schedule) => schedule.active !== false)
+    .forEach((schedule) => {
+      const slotKey = normalizeSlotKey(schedule.slot);
+      if (!slotKey) return;
+
+      const stock = Math.max(0, Number(slots[slotKey]?.stock_current ?? 0));
+      if (stock <= 0) return;
+
+      const occurrenceDoseCount = dosesPerOccurrence(schedule);
+      const start = parseStartDate(schedule.start_date);
+      const cursor = new Date(start);
+      let scheduledDoses = 0;
+      let guard = 0;
+
+      while (scheduledDoses < stock && guard < 730) {
+        guard += 1;
+        if (isWeeklyDoseDay(schedule, cursor)) {
+          const dosesToday = Math.min(occurrenceDoseCount, stock - scheduledDoses);
+          if (cursor >= monthStart && cursor <= monthEnd) {
+            const key = localDateKey(cursor);
+            const times = (schedule.times?.length ? schedule.times : ["08:00"]).slice(0, dosesToday);
+            calendar[key] = [
+              ...(calendar[key] || []),
+              ...times.map((time) => ({ schedule, slotKey, time })),
+            ];
+          }
+          scheduledDoses += dosesToday;
+        }
+        cursor.setDate(cursor.getDate() + 1);
+      }
+    });
+
+  return calendar;
 }
 
 // ─── Inline Edit Panel ────────────────────────────────────────────────────────
@@ -193,7 +283,7 @@ function EditPanel({
     }
     setSaving(true);
     try {
-      const schedRef = ref(db, `schedules/${schedule.key}`);
+      const schedRef = ref(db, `schedule/${schedule.key}`);
       await update(schedRef, {
         medication_name: draft.medication_name.trim(),
         dosage: draft.dosage.trim(),
@@ -213,7 +303,7 @@ function EditPanel({
   const handleDelete = async () => {
     setDeleting(true);
     try {
-      const schedRef = ref(db, `schedules/${schedule.key}`);
+      const schedRef = ref(db, `schedule/${schedule.key}`);
       await remove(schedRef);
       toast.success("Schedule deleted.");
       onClose();
@@ -224,8 +314,9 @@ function EditPanel({
     }
   };
 
-  const slotNum = SLOT_NUM[schedule.slot] ?? "?";
-  const slotColor = SLOT_COLORS[schedule.slot] ?? "bg-muted";
+  const slotKey = normalizeSlotKey(schedule.slot);
+  const slotNum = slotKey ? SLOT_NUM[slotKey] : "?";
+  const slotColor = slotKey ? SLOT_COLORS[slotKey] : "bg-muted";
 
   return (
     <div className="rounded-xl border border-primary/30 bg-popover/95 shadow-xl animate-fade-in">
@@ -504,14 +595,15 @@ const ScheduleRow = memo(function ScheduleRow({
   onEditToggle: () => void;
 }) {
   const [toggling, setToggling] = useState(false);
-  const slotNum = SLOT_NUM[schedule.slot] ?? "?";
-  const slotColor = SLOT_COLORS[schedule.slot] ?? "bg-muted";
+  const slotKey = normalizeSlotKey(schedule.slot);
+  const slotNum = slotKey ? SLOT_NUM[slotKey] : "?";
+  const slotColor = slotKey ? SLOT_COLORS[slotKey] : "bg-muted";
   const isActive = schedule.active !== false;
 
   const handleTogglePause = async () => {
     setToggling(true);
     try {
-      const schedRef = ref(db, `schedules/${schedule.key}`);
+      const schedRef = ref(db, `schedule/${schedule.key}`);
       await update(schedRef, { active: !isActive });
       toast.success(
         isActive
@@ -612,12 +704,17 @@ function SchedulePage() {
   const todayMonth = new Date().getMonth();
 
   const [schedules, setSchedules] = useState<ScheduleEntry[]>([]);
+  const [slots, setSlots] = useState<Record<SlotKey, SlotStock>>({
+    slot1: { medication_name: "", stock_current: 0 },
+    slot2: { medication_name: "", stock_current: 0 },
+    slot3: { medication_name: "", stock_current: 0 },
+  });
   const [loadingSchedules, setLoadingSchedules] = useState(true);
   const [schedulesError, setSchedulesError] = useState<string | null>(null);
   const [editingKey, setEditingKey] = useState<string | null>(null);
 
   useEffect(() => {
-    const schedulesRef = ref(db, "schedules");
+    const schedulesRef = ref(db, "schedule");
     const unsub = onValue(
       schedulesRef,
       (snapshot: DataSnapshot) => {
@@ -628,7 +725,7 @@ function SchedulePage() {
         // Sort: active first, then by slot
         entries.sort((a, b) => {
           if (a.active === b.active) {
-            return (a.slot ?? "").localeCompare(b.slot ?? "");
+            return String(a.slot ?? "").localeCompare(String(b.slot ?? ""));
           }
           return a.active ? -1 : 1;
         });
@@ -644,18 +741,38 @@ function SchedulePage() {
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    const slotsRef = ref(db, "slots");
+    const unsub = onValue(slotsRef, (snapshot: DataSnapshot) => {
+      const raw = snapshot.val() || {};
+      setSlots({
+        slot1: {
+          medication_name: raw.slot1?.medication_name || "",
+          stock_current: Number(raw.slot1?.stock_current ?? 0),
+        },
+        slot2: {
+          medication_name: raw.slot2?.medication_name || "",
+          stock_current: Number(raw.slot2?.stock_current ?? 0),
+        },
+        slot3: {
+          medication_name: raw.slot3?.medication_name || "",
+          stock_current: Number(raw.slot3?.stock_current ?? 0),
+        },
+      });
+    });
+    return () => unsub();
+  }, []);
+
   const handleEditToggle = useCallback((key: string) => {
     setEditingKey((prev) => (prev === key ? null : key));
   }, []);
 
-  // Build calendar slot times from Firebase schedules (active only)
+  const monthStart = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+  const monthEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0, 23, 59, 59);
+
+  // Build calendar doses from Firebase inventory stock and schedule frequency.
   const activeSchedules = schedules.filter((s) => s.active !== false);
-  const slotTimesForCalendar: Record<string, string[]> = {};
-  activeSchedules.forEach((s) => {
-    if (s.slot && s.times?.length > 0) {
-      slotTimesForCalendar[s.slot] = s.times;
-    }
-  });
+  const calendarDoses = buildCalendarDoses(activeSchedules, slots, monthStart, monthEnd);
 
   return (
     <div className="space-y-6">
@@ -741,14 +858,7 @@ function SchedulePage() {
                   ? "bg-warning"
                   : "bg-destructive";
 
-              // Show slot schedule pills from Firebase data
-              const slotPills = (["slot1", "slot2", "slot3"] as const).map(
-                (slotKey) => {
-                  const times = slotTimesForCalendar[slotKey];
-                  if (!times) return null;
-                  return { slotKey, time: times[0] };
-                }
-              ).filter(Boolean) as { slotKey: string; time: string }[];
+              const doseItems = calendarDoses[localDateKey(c.date)] || [];
 
               return (
                 <div
@@ -772,33 +882,26 @@ function SchedulePage() {
                     />
                   </div>
                   <div className="mt-2 space-y-1">
-                    {slotPills.length > 0
-                      ? slotPills.map(({ slotKey, time }) => (
+                    {doseItems.length > 0 &&
+                      doseItems.slice(0, 4).map(({ schedule, slotKey, time }, index) => (
                           <div
-                            key={slotKey}
+                            key={`${schedule.key}-${time}-${index}`}
                             className="flex items-center gap-1"
+                            title={`${schedule.medication_name} at ${time}`}
                           >
                             <span
                               className={`h-1 w-3 rounded-sm ${SLOT_COLORS[slotKey]}`}
                             />
-                            <span className="text-[10px] text-muted-foreground">
-                              {time}
-                            </span>
-                          </div>
-                        ))
-                      : // fallback placeholder pills when no Firebase data yet
-                        [1, 2, 3].map((slot) => (
-                          <div key={slot} className="flex items-center gap-1">
-                            <span
-                              className={`h-1 w-3 rounded-sm ${
-                                SLOT_COLORS[`slot${slot}`]
-                              } opacity-30`}
-                            />
-                            <span className="text-[10px] text-muted-foreground/40">
-                              —
+                            <span className="truncate text-[10px] text-muted-foreground">
+                              {time} {schedule.medication_name}
                             </span>
                           </div>
                         ))}
+                    {doseItems.length > 4 && (
+                      <div className="text-[10px] text-muted-foreground">
+                        +{doseItems.length - 4} more
+                      </div>
+                    )}
                   </div>
                 </div>
               );

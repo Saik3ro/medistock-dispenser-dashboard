@@ -260,7 +260,7 @@ function DashboardPage() {
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Good morning, Eleanor</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Good Morning, Eleanor</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Friday, May 22 · {summary.scheduled} doses scheduled today across 3 slots.
           </p>
@@ -289,10 +289,13 @@ function DashboardPage() {
         </div>
         <div className="mt-3 grid gap-2 text-[13px]">
           <div>
-            <span className="font-medium text-foreground">Device status:</span> {debugDeviceStatus ?? "Loading..."}
+            <span className="font-medium text-foreground">Device Status:</span>{" "}
+            {debugDeviceStatus
+              ? debugDeviceStatus.charAt(0).toUpperCase() + debugDeviceStatus.slice(1)
+              : "Loading..."}
           </div>
           <div>
-            <span className="font-medium text-foreground">Slot 1 medication:</span> {debugSlot1Medication ?? "Loading..."}
+            <span className="font-medium text-foreground">Slot 1 Medication:</span> {debugSlot1Medication ?? "Loading..."}
           </div>
         </div>
       </div>
@@ -344,7 +347,7 @@ function DashboardPage() {
         <section className="lg:col-span-2 space-y-3">
           <div className="flex items-end justify-between">
             <div>
-              <h2 className="text-sm font-semibold tracking-tight">Dispenser slots</h2>
+              <h2 className="text-sm font-semibold tracking-tight">Dispenser Slots</h2>
               <p className="text-[11px] text-muted-foreground">Live state from MediStock-A1</p>
             </div>
             <Link to="/inventory" className="text-[11px] text-primary hover:underline">Manage inventory</Link>
@@ -507,4 +510,3 @@ function DashboardPage() {
     </div>
   );
 }
-
