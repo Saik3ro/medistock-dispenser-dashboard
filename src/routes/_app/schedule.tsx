@@ -109,12 +109,6 @@ function buildMonth(year: number, month: number) {
   return cells;
 }
 
-function dayStatus(d: number) {
-  if (d % 9 === 0) return "missed";
-  if (d % 5 === 0) return "partial";
-  return "ok";
-}
-
 function timesForFrequency(freq: Frequency, current: string[]): string[] {
   if (freq === "daily") return [current[0] || "08:00"];
   if (freq === "twice_daily")
@@ -161,13 +155,23 @@ function isWeeklyDoseDay(schedule: ScheduleEntry, date: Date): boolean {
   return days.includes(WEEK_DAYS[date.getDay()]);
 }
 
+interface DispensedDose {
+  key: string;
+  slot: number;
+  medication_name: string;
+  status: "dispensed" | "jammed" | "missed" | "cancelled";
+  timestamp: number;
+  scheduled_dose_id?: string;
+}
+
 function buildCalendarDoses(
   schedules: ScheduleEntry[],
   slots: Record<SlotKey, SlotStock>,
   monthStart: Date,
-  monthEnd: Date
+  monthEnd: Date,
+  missedDoses: Record<string, DispensedDose[]> = {}
 ) {
-  const calendar: Record<string, Array<{ schedule: ScheduleEntry; slotKey: SlotKey; time: string }>> = {};
+  const calendar: Record<string, Array<{ schedule: ScheduleEntry; slotKey: SlotKey; time: string; status?: string; missed?: boolean }>> = {};
 
   schedules
     .filter((schedule) => schedule.active !== false)
@@ -193,7 +197,14 @@ function buildCalendarDoses(
             const times = (schedule.times?.length ? schedule.times : ["08:00"]).slice(0, dosesToday);
             calendar[key] = [
               ...(calendar[key] || []),
-              ...times.map((time) => ({ schedule, slotKey, time })),
+              ...times.map((time) => {
+                // Check if this dose was marked as missed
+                const missedForDate = missedDoses[key] || [];
+                const isMissed = missedForDate.some(
+                  (m) => m.slot === Number(schedule.slot) && m.status === "missed"
+                );
+                return { schedule, slotKey, time, status: isMissed ? "missed" : undefined, missed: isMissed };
+              }),
             ];
           }
           scheduledDoses += dosesToday;
@@ -635,6 +646,11 @@ const ScheduleRow = memo(function ScheduleRow({
                 Paused
               </span>
             )}
+            {schedule.missed_count && schedule.missed_count > 0 && (
+              <span className="ml-1.5 inline-flex items-center rounded-full bg-destructive/15 px-1.5 py-0.5 text-[10px] font-semibold text-destructive">
+                {schedule.missed_count} missed
+              </span>
+            )}
           </div>
           {schedule.dosage && (
             <div className="text-[11px] text-muted-foreground/70">
@@ -709,6 +725,7 @@ function SchedulePage() {
     slot2: { medication_name: "", stock_current: 0 },
     slot3: { medication_name: "", stock_current: 0 },
   });
+  const [missedDoses, setMissedDoses] = useState<Record<string, DispensedDose[]>>({});
   const [loadingSchedules, setLoadingSchedules] = useState(true);
   const [schedulesError, setSchedulesError] = useState<string | null>(null);
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -720,7 +737,7 @@ function SchedulePage() {
       (snapshot: DataSnapshot) => {
         const raw = snapshot.val() || {};
         const entries: ScheduleEntry[] = Object.entries(raw).map(
-          ([key, val]) => ({ ...(val as Omit<ScheduleEntry, "key">), key })
+          ([key, val]: any) => ({ ...(val as Omit<ScheduleEntry, "key">), key })
         );
         // Sort: active first, then by slot
         entries.sort((a, b) => {
@@ -729,7 +746,20 @@ function SchedulePage() {
           }
           return a.active ? -1 : 1;
         });
-        setSchedules(entries);
+        
+        // Log any changes to start_date (indicating rescheduling)
+        setSchedules((prevSchedules) => {
+          entries.forEach((entry) => {
+            const prev = prevSchedules.find((s) => s.key === entry.key);
+            if (prev && prev.start_date !== entry.start_date) {
+              console.log(
+                `[Schedule Updated] ${entry.medication_name}: ${prev.start_date} → ${entry.start_date}`
+              );
+            }
+          });
+          return entries;
+        });
+        
         setLoadingSchedules(false);
         setSchedulesError(null);
       },
@@ -763,6 +793,35 @@ function SchedulePage() {
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    const dispenseLogRef = ref(db, "dispense_log");
+    const unsub = onValue(dispenseLogRef, (snapshot: DataSnapshot) => {
+      const raw = snapshot.val() || {};
+      const allDoses = Object.entries(raw).map(([key, val]: any) => ({
+        key,
+        ...val,
+      } as DispensedDose));
+
+      // Group missed doses by date (YYYY-MM-DD)
+      const missedByDate: Record<string, DispensedDose[]> = {};
+      allDoses
+        .filter((dose) => dose.status === "missed")
+        .forEach((dose) => {
+          const dateObj = new Date(dose.timestamp);
+          const dateKey = localDateKey(dateObj);
+          if (!missedByDate[dateKey]) {
+            missedByDate[dateKey] = [];
+          }
+          missedByDate[dateKey].push(dose);
+        });
+
+      console.log("[Missed Doses Loaded]", missedByDate);
+      setMissedDoses(missedByDate);
+    });
+
+    return () => unsub();
+  }, []);
+
   const handleEditToggle = useCallback((key: string) => {
     setEditingKey((prev) => (prev === key ? null : key));
   }, []);
@@ -772,7 +831,7 @@ function SchedulePage() {
 
   // Build calendar doses from Firebase inventory stock and schedule frequency.
   const activeSchedules = schedules.filter((s) => s.active !== false);
-  const calendarDoses = buildCalendarDoses(activeSchedules, slots, monthStart, monthEnd);
+  const calendarDoses = buildCalendarDoses(activeSchedules, slots, monthStart, monthEnd, missedDoses);
 
   return (
     <div className="space-y-6">
@@ -817,17 +876,6 @@ function SchedulePage() {
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             </div>
-            <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-success" /> All taken
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-warning" /> Partial
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="h-2 w-2 rounded-full bg-destructive" /> Missed
-              </span>
-            </div>
           </div>
 
           <div className="grid grid-cols-7 border-b border-border text-center text-[11px] uppercase tracking-wider text-muted-foreground">
@@ -847,16 +895,9 @@ function SchedulePage() {
                     className="h-24 border-b border-r border-border/60 bg-background/40 last:border-r-0"
                   />
                 );
-              const status = dayStatus(c.day);
               const isToday =
                 c.day === todayDate &&
                 cursor.getMonth() === todayMonth;
-              const dotColor =
-                status === "ok"
-                  ? "bg-success"
-                  : status === "partial"
-                  ? "bg-warning"
-                  : "bg-destructive";
 
               const doseItems = calendarDoses[localDateKey(c.date)] || [];
 
@@ -877,9 +918,6 @@ function SchedulePage() {
                     >
                       {c.day}
                     </span>
-                    <span
-                      className={`h-1.5 w-1.5 rounded-full ${dotColor}`}
-                    />
                   </div>
                   <div className="mt-2 space-y-1">
                     {doseItems.length > 0 &&

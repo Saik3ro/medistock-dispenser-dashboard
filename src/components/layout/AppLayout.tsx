@@ -110,13 +110,23 @@ function PatientSwitcher() {
   );
 }
 
-function RealtimeClock() {
+function useNow() {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  return now;
+}
+
+function formatSyncTime(date: Date) {
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function RealtimeClock() {
+  const now = useNow();
 
   return (
     <div className="hidden items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-muted-foreground sm:flex">
@@ -137,6 +147,8 @@ export function AppLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const current = nav.find((n) => n.to === pathname);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const now = useNow();
+  const syncTime = formatSyncTime(now);
   
   // Collapse state for desktop side menu, persisting to localStorage
   const [isCollapsed, setIsCollapsed] = useState(() => {
@@ -209,11 +221,7 @@ export function AppLayout() {
         <div className={`border-t border-sidebar-border px-4 py-3 text-[11px] text-muted-foreground transition-all duration-300 ${
           isCollapsed ? "text-center px-1" : ""
         }`}>
-          {isCollapsed ? (
-            <span>{new Date(device.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          ) : (
-            <span>Last sync · {new Date(device.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          )}
+          <span>{isCollapsed ? syncTime : <>Last sync {"\u00b7"} {syncTime}</>}</span>
         </div>
       </aside>
 
@@ -269,13 +277,6 @@ export function AppLayout() {
             </Link>
               <div className="hidden items-center gap-3 sm:flex">
                 <PatientSwitcher />
-                <div className="h-9 items-center gap-2 rounded-md border border-border bg-surface px-2.5 flex">
-                  <div className="grid h-6 w-6 place-items-center rounded-full bg-primary/20 text-[11px] font-semibold text-primary">EM</div>
-                  <div className="leading-tight">
-                    <div className="text-xs font-medium">Eleanor M.</div>
-                    <div className="text-[10px] text-muted-foreground">Caregiver</div>
-                  </div>
-                </div>
               </div>
           </div>
         </div>
@@ -313,7 +314,7 @@ export function AppLayout() {
               ))}
             </nav>
             <div className="border-t border-sidebar-border px-4 py-3 mt-4 text-[11px] text-muted-foreground">
-              Last sync · {new Date(device.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              Last sync {"\u00b7"} {syncTime}
             </div>
           </aside>
         </div>
