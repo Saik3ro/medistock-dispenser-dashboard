@@ -282,7 +282,7 @@ function DashboardPage() {
         {slots.map((slot) => (
           <Link
             key={slot.slot_number}
-            to="/app/inventory"
+            to="/inventory"
             className="block"
           >
             <div className="bg-slate-900 border border-slate-700 rounded-lg p-4 hover:border-slate-600 transition-colors">
